@@ -6,6 +6,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import yt_dlp
 import tempfile
 import shutil
+import traceback # Import traceback for detailed error logging
 
 # Configure logging
 logging.basicConfig(
@@ -62,110 +63,81 @@ The bot will download the video in the best available quality up to 720p.
     async def download_ted_talk(self, url: str) -> dict:
         """Download TED Talk video using yt-dlp."""
         try:
-            # Create a unique filename
             output_path = os.path.join(self.temp_dir, '%(title)s.%(ext)s')
             
-            # --- THIS IS THE UPDATED PART ---
             ydl_opts = {
-                # Use a more robust format selector to find the best 720p MP4 version.
-                # This tries to get the best 720p video and audio and merge them,
-                # with a fallback to a pre-merged file.
-                'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]',
+                'format': 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
+                'merge_output_format': 'mp4',
                 'outtmpl': output_path,
                 'noplaylist': True,
                 'extract_flat': False,
+                # Add a logger to capture yt-dlp's own messages
+                'logger': logger,
+                'progress_hooks': [lambda d: logger.info(d['status']) if d['status'] in ['downloading', 'finished'] else None],
             }
-            # --- END OF UPDATE ---
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                # Extract info first
                 info = ydl.extract_info(url, download=False)
                 title = info.get('title', 'TED Talk')
                 duration = info.get('duration', 0)
                 
-                # Check file size estimation (rough)
-                if duration > 1800:  # 30 minutes
-                    return {
-                        'success': False,
-                        'error': 'Video too long (>30 minutes). Please try a shorter video.'
-                    }
+                if duration > 1800:
+                    return {'success': False, 'error': 'Video too long (>30 minutes). Please try a shorter video.'}
                 
-                # Download the video
+                logger.info(f"Starting download for: {title}")
                 ydl.download([url])
-                
-                # Find the downloaded file
+                logger.info(f"Finished download for: {title}")
+
                 downloaded_file = None
                 for file in os.listdir(self.temp_dir):
-                    if file.endswith(('.mp4', '.webm', '.mkv')):
+                    if file.endswith('.mp4'):
                         downloaded_file = os.path.join(self.temp_dir, file)
                         break
                 
                 if downloaded_file and os.path.exists(downloaded_file):
-                    # Check file size (Telegram limit is 50MB)
                     file_size = os.path.getsize(downloaded_file)
-                    if file_size > 50 * 1024 * 1024:  # 50MB
-                        os.remove(downloaded_file) # Clean up oversized file
-                        return {
-                            'success': False,
-                            'error': 'File too large (>50MB). Telegram limit exceeded.'
-                        }
+                    if file_size > 50 * 1024 * 1024:
+                        os.remove(downloaded_file)
+                        return {'success': False, 'error': 'File too large (>50MB). Telegram limit exceeded.'}
                     
-                    return {
-                        'success': True,
-                        'file_path': downloaded_file,
-                        'title': title,
-                        'file_size': file_size
-                    }
+                    return {'success': True, 'file_path': downloaded_file, 'title': title, 'file_size': file_size}
                 else:
-                    return {
-                        'success': False,
-                        'error': 'Failed to locate downloaded file.'
-                    }
+                    logger.warning("Could not find the final .mp4 file after download.")
+                    return {'success': False, 'error': 'Failed to locate the final downloaded video file.'}
                     
+        # --- THIS IS THE NEW DEBUGGING PART ---
         except Exception as e:
-            logger.error(f"yt-dlp download error: {e}")
-            # Provide a cleaner error message to the user
-            if "Requested format is not available" in str(e):
-                 return {
-                    'success': False,
-                    'error': 'Could not find a suitable download format for this video.'
-                }
-            return {
-                'success': False,
-                'error': 'An unexpected error occurred during download.'
-            }
+            # Log the full, detailed error to the console for debugging
+            logger.error("--- DETAILED YT-DLP ERROR ---")
+            logger.error(traceback.format_exc())
+            logger.error("-----------------------------")
+            
+            # Return a user-friendly error
+            if "Requested format is not available" in str(e) or "No video formats found" in str(e):
+                 return {'success': False, 'error': 'Could not find a suitable download format for this video.'}
+            return {'success': False, 'error': 'An unexpected error occurred during download.'}
+        # --- END OF DEBUGGING PART ---
+
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle incoming messages with URLs."""
         message_text = update.message.text.strip()
         
-        # Check if message contains a URL
-        if not message_text.startswith('http'):
-            await update.message.reply_text(
-                "Please send a valid TED Talk URL.\n"
-                "Example: https://www.ted.com/talks/..."
-            )
-            return
-        
-        # Check if it's a TED URL
-        if not self.is_ted_url(message_text):
+        if not message_text.startswith('http') or not self.is_ted_url(message_text):
             await update.message.reply_text(
                 "Please send a valid TED Talk URL from ted.com\n"
                 "Example: https://www.ted.com/talks/..."
             )
             return
         
-        # Send processing message
         processing_msg = await update.message.reply_text(
             "🔄 Processing your request...\nThis might take a few moments."
         )
         
         try:
-            # Download the video
             result = await self.download_ted_talk(message_text)
             
             if result['success']:
-                # Send the video file
                 await processing_msg.edit_text("📤 Uploading video...")
                 
                 with open(result['file_path'], 'rb') as video_file:
@@ -176,17 +148,14 @@ The bot will download the video in the best available quality up to 720p.
                         supports_streaming=True
                     )
                 
-                # Clean up the file
                 os.remove(result['file_path'])
-                
-                # Delete processing message
                 await processing_msg.delete()
                 
             else:
                 await processing_msg.edit_text(f"❌ Error: {result['error']}")
                 
         except Exception as e:
-            logger.error(f"General handling error: {e}")
+            logger.error(f"General handling error: {traceback.format_exc()}")
             await processing_msg.edit_text(f"❌ An unexpected error occurred.")
 
     def cleanup(self):
@@ -202,18 +171,13 @@ def main():
         logger.error("FATAL: TELEGRAM_TOKEN environment variable not set.")
         return
 
-    # Create bot instance
     bot = TEDTalkBot()
-    
-    # Create application
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Add handlers
     application.add_handler(CommandHandler("start", bot.start))
     application.add_handler(CommandHandler("help", bot.help_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message))
     
-    # Run the bot
     logger.info("🤖 TED Talk Bot is starting...")
     
     try:
@@ -225,5 +189,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
