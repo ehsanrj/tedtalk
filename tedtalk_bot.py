@@ -6,7 +6,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import yt_dlp
 import tempfile
 import shutil
-import traceback # Import traceback for detailed error logging
+import traceback
+import requests # New import for uploading
 
 # Configure logging
 logging.basicConfig(
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 # Bot token is loaded from environment variables
 BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_FILE_LIMIT = 49 * 1024 * 1024  # 49MB to be safe
 
 class TEDTalkBot:
     def __init__(self):
@@ -29,11 +31,7 @@ class TEDTalkBot:
 
 Send me a TED Talk URL and I'll download it for you.
 
-Commands:
-/start - Show this welcome message
-/help - Show help information
-
-Just paste any TED Talk URL and I'll handle the rest!
+For videos under 50MB, I'll send the file directly. For larger videos, I'll provide a temporary download link.
         """
         await update.message.reply_text(welcome_message)
 
@@ -43,15 +41,11 @@ Just paste any TED Talk URL and I'll handle the rest!
 🆘 Help Information:
 
 1. Copy a TED Talk URL from ted.com
-2. Paste it here in the chat
-3. Wait for the download to complete
-4. Receive your video file!
+2. Paste it here in the chat.
+3. Wait for the download to complete.
+4. You'll receive either the video file directly (if <50MB) or a download link (if >50MB).
 
-Supported formats:
-- https://www.ted.com/talks/...
-- https://ted.com/talks/...
-
-The bot will download the video in the best available quality up to 720p.
+Download links are active for 14 days.
         """
         await update.message.reply_text(help_text)
 
@@ -60,29 +54,38 @@ The bot will download the video in the best available quality up to 720p.
         ted_domains = ['ted.com', 'www.ted.com']
         return any(domain in url.lower() for domain in ted_domains) and '/talks/' in url.lower()
 
+    async def upload_to_transfer_sh(self, file_path: str) -> dict:
+        """Uploads a file to transfer.sh and returns the link."""
+        try:
+            file_name = os.path.basename(file_path)
+            with open(file_path, 'rb') as f:
+                response = requests.put(f'https://transfer.sh/{file_name}', data=f)
+            
+            if response.status_code == 200:
+                return {'success': True, 'link': response.text}
+            else:
+                logger.error(f"transfer.sh upload failed with status {response.status_code}: {response.text}")
+                return {'success': False, 'error': 'Failed to upload file to hosting service.'}
+        except Exception as e:
+            logger.error(f"Exception during upload: {traceback.format_exc()}")
+            return {'success': False, 'error': 'An exception occurred during file upload.'}
+
     async def download_ted_talk(self, url: str) -> dict:
         """Download TED Talk video using yt-dlp."""
         try:
             output_path = os.path.join(self.temp_dir, '%(title)s.%(ext)s')
             
             ydl_opts = {
+                # We can go back to 720p since we are not limited by size anymore
                 'format': 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
                 'merge_output_format': 'mp4',
                 'outtmpl': output_path,
                 'noplaylist': True,
-                'extract_flat': False,
-                # Add a logger to capture yt-dlp's own messages
-                'logger': logger,
-                'progress_hooks': [lambda d: logger.info(d['status']) if d['status'] in ['downloading', 'finished'] else None],
             }
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 title = info.get('title', 'TED Talk')
-                duration = info.get('duration', 0)
-                
-                if duration > 1800:
-                    return {'success': False, 'error': 'Video too long (>30 minutes). Please try a shorter video.'}
                 
                 logger.info(f"Starting download for: {title}")
                 ydl.download([url])
@@ -96,67 +99,71 @@ The bot will download the video in the best available quality up to 720p.
                 
                 if downloaded_file and os.path.exists(downloaded_file):
                     file_size = os.path.getsize(downloaded_file)
-                    if file_size > 50 * 1024 * 1024:
-                        os.remove(downloaded_file)
-                        return {'success': False, 'error': 'File too large (>50MB). Telegram limit exceeded.'}
-                    
                     return {'success': True, 'file_path': downloaded_file, 'title': title, 'file_size': file_size}
                 else:
-                    logger.warning("Could not find the final .mp4 file after download.")
                     return {'success': False, 'error': 'Failed to locate the final downloaded video file.'}
                     
-        # --- THIS IS THE NEW DEBUGGING PART ---
         except Exception as e:
-            # Log the full, detailed error to the console for debugging
-            logger.error("--- DETAILED YT-DLP ERROR ---")
-            logger.error(traceback.format_exc())
-            logger.error("-----------------------------")
-            
-            # Return a user-friendly error
-            if "Requested format is not available" in str(e) or "No video formats found" in str(e):
-                 return {'success': False, 'error': 'Could not find a suitable download format for this video.'}
+            logger.error(f"Download error: {traceback.format_exc()}")
             return {'success': False, 'error': 'An unexpected error occurred during download.'}
-        # --- END OF DEBUGGING PART ---
-
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle incoming messages with URLs."""
         message_text = update.message.text.strip()
         
         if not message_text.startswith('http') or not self.is_ted_url(message_text):
-            await update.message.reply_text(
-                "Please send a valid TED Talk URL from ted.com\n"
-                "Example: https://www.ted.com/talks/..."
-            )
+            await update.message.reply_text("Please send a valid TED Talk URL from ted.com")
             return
         
-        processing_msg = await update.message.reply_text(
-            "🔄 Processing your request...\nThis might take a few moments."
-        )
+        processing_msg = await update.message.reply_text("🔄 Processing your request...")
         
         try:
-            result = await self.download_ted_talk(message_text)
+            download_result = await self.download_ted_talk(message_text)
             
-            if result['success']:
-                await processing_msg.edit_text("📤 Uploading video...")
-                
-                with open(result['file_path'], 'rb') as video_file:
+            if not download_result['success']:
+                await processing_msg.edit_text(f"❌ Error: {download_result['error']}")
+                return
+
+            file_path = download_result['file_path']
+            file_size = download_result['file_size']
+            title = download_result['title']
+
+            # --- NEW LOGIC: Check file size ---
+            if file_size < TELEGRAM_FILE_LIMIT:
+                await processing_msg.edit_text("✅ Download complete! Uploading video to Telegram...")
+                with open(file_path, 'rb') as video_file:
                     await update.message.reply_video(
                         video=video_file,
-                        caption=f"🎬 {result['title']}\n\n"
-                               f"📊 Size: {result['file_size'] / (1024*1024):.1f} MB",
+                        caption=f"🎬 {title}\n📊 Size: {file_size / (1024*1024):.1f} MB",
                         supports_streaming=True
                     )
-                
-                os.remove(result['file_path'])
                 await processing_msg.delete()
-                
             else:
-                await processing_msg.edit_text(f"❌ Error: {result['error']}")
-                
+                await processing_msg.edit_text("✅ Download complete! File is too large for Telegram, generating a download link...")
+                upload_result = await self.upload_to_transfer_sh(file_path)
+                if upload_result['success']:
+                    link = upload_result['link']
+                    await processing_msg.edit_text(
+                        f"🎬 {title}\n\n"
+                        f"🔗 This video is too large for Telegram ({file_size / (1024*1024):.1f} MB).\n\n"
+                        f"Here is your temporary download link (expires in 14 days):\n{link}"
+                    )
+                else:
+                    await processing_msg.edit_text(f"❌ Error: {upload_result['error']}")
+
+            # Clean up the downloaded file regardless of the outcome
+            os.remove(file_path)
+
         except Exception as e:
             logger.error(f"General handling error: {traceback.format_exc()}")
-            await processing_msg.edit_text(f"❌ An unexpected error occurred.")
+            await processing_msg.edit_text("❌ An unexpected error occurred.")
+        finally:
+            # This ensures the processing message is removed unless it's an error
+            if processing_msg and not processing_msg.text.startswith("❌"):
+                try:
+                    await processing_msg.delete()
+                except Exception:
+                    pass # Message might have been deleted already
 
     def cleanup(self):
         """Clean up temporary files."""
