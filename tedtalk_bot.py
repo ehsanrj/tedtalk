@@ -7,7 +7,7 @@ import yt_dlp
 import tempfile
 import shutil
 import traceback
-import requests # New import for uploading
+import requests # Used for uploading
 
 # Configure logging
 logging.basicConfig(
@@ -45,7 +45,7 @@ For videos under 50MB, I'll send the file directly. For larger videos, I'll prov
 3. Wait for the download to complete.
 4. You'll receive either the video file directly (if <50MB) or a download link (if >50MB).
 
-Download links are active for 14 days.
+Download links are active for about a week.
         """
         await update.message.reply_text(help_text)
 
@@ -54,21 +54,39 @@ Download links are active for 14 days.
         ted_domains = ['ted.com', 'www.ted.com']
         return any(domain in url.lower() for domain in ted_domains) and '/talks/' in url.lower()
 
-    async def upload_to_transfer_sh(self, file_path: str) -> dict:
-        """Uploads a file to transfer.sh and returns the link."""
+    # --- THIS FUNCTION HAS BEEN REPLACED ---
+    async def upload_to_filebin(self, file_path: str) -> dict:
+        """Uploads a file to filebin.net and returns the link."""
         try:
             file_name = os.path.basename(file_path)
-            with open(file_path, 'rb') as f:
-                response = requests.put(f'https://transfer.sh/{file_name}', data=f)
+            # A 'bin' is like a folder. We upload the file into a new bin.
+            bin_url = "https://filebin.net/api/bin"
             
-            if response.status_code == 200:
-                return {'success': True, 'link': response.text}
-            else:
-                logger.error(f"transfer.sh upload failed with status {response.status_code}: {response.text}")
-                return {'success': False, 'error': 'Failed to upload file to hosting service.'}
+            # First, create a new bin
+            bin_response = requests.post(bin_url)
+            bin_response.raise_for_status() # Will raise an error for bad status codes
+            bin_id = bin_response.json()['id']
+
+            # Now, upload the file to the created bin
+            upload_url = f"https://filebin.net/api/{bin_id}/file/{file_name}"
+
+            with open(file_path, 'rb') as f:
+                headers = {'Content-Type': 'application/octet-stream'}
+                response = requests.post(upload_url, data=f, headers=headers)
+            
+            response.raise_for_status()
+
+            # Construct the download link
+            download_link = f"https://filebin.net/{bin_id}/{file_name}"
+            return {'success': True, 'link': download_link}
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Filebin upload failed (RequestException): {e}")
+            return {'success': False, 'error': 'Failed to communicate with the file hosting service.'}
         except Exception as e:
             logger.error(f"Exception during upload: {traceback.format_exc()}")
             return {'success': False, 'error': 'An exception occurred during file upload.'}
+    # --- END OF REPLACEMENT ---
 
     async def download_ted_talk(self, url: str) -> dict:
         """Download TED Talk video using yt-dlp."""
@@ -76,7 +94,6 @@ Download links are active for 14 days.
             output_path = os.path.join(self.temp_dir, '%(title)s.%(ext)s')
             
             ydl_opts = {
-                # We can go back to 720p since we are not limited by size anymore
                 'format': 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
                 'merge_output_format': 'mp4',
                 'outtmpl': output_path,
@@ -128,7 +145,6 @@ Download links are active for 14 days.
             file_size = download_result['file_size']
             title = download_result['title']
 
-            # --- NEW LOGIC: Check file size ---
             if file_size < TELEGRAM_FILE_LIMIT:
                 await processing_msg.edit_text("✅ Download complete! Uploading video to Telegram...")
                 with open(file_path, 'rb') as video_file:
@@ -137,30 +153,27 @@ Download links are active for 14 days.
                         caption=f"🎬 {title}\n📊 Size: {file_size / (1024*1024):.1f} MB",
                         supports_streaming=True
                     )
-                # Delete the temporary "Uploading..." message
                 await processing_msg.delete()
             else:
                 await processing_msg.edit_text("✅ Download complete! File is too large for Telegram, generating a download link...")
-                upload_result = await self.upload_to_transfer_sh(file_path)
+                # --- THIS LINE HAS BEEN UPDATED ---
+                upload_result = await self.upload_to_filebin(file_path)
+                # --- END OF UPDATE ---
                 if upload_result['success']:
                     link = upload_result['link']
                     await processing_msg.edit_text(
                         f"🎬 {title}\n\n"
                         f"🔗 This video is too large for Telegram ({file_size / (1024*1024):.1f} MB).\n\n"
-                        f"Here is your temporary download link (expires in 14 days):\n{link}"
+                        f"Here is your temporary download link:\n{link}"
                     )
                 else:
-                    # This is an error message, so it should stay.
                     await processing_msg.edit_text(f"❌ Error: {upload_result['error']}")
 
-            # Clean up the downloaded file regardless of the outcome
             os.remove(file_path)
 
         except Exception as e:
             logger.error(f"General handling error: {traceback.format_exc()}")
             await processing_msg.edit_text("❌ An unexpected error occurred.")
-        # The faulty 'finally' block has been removed. Error and link messages will now persist.
-
 
     def cleanup(self):
         """Clean up temporary files."""
