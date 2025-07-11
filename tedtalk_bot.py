@@ -45,7 +45,7 @@ For videos under 50MB, I'll send the file directly. For larger videos, I'll prov
 3. Wait for the download to complete.
 4. You'll receive either the video file directly (if <50MB) or a download link (if >50MB).
 
-Download links are active for about a week.
+Download links are active for at least 30 days.
         """
         await update.message.reply_text(help_text)
 
@@ -55,33 +55,25 @@ Download links are active for about a week.
         return any(domain in url.lower() for domain in ted_domains) and '/talks/' in url.lower()
 
     # --- THIS FUNCTION HAS BEEN REPLACED ---
-    async def upload_to_filebin(self, file_path: str) -> dict:
-        """Uploads a file to filebin.net and returns the link."""
+    async def upload_to_0x0st(self, file_path: str) -> dict:
+        """Uploads a file to 0x0.st and returns the link."""
         try:
-            file_name = os.path.basename(file_path)
-            # A 'bin' is like a folder. We upload the file into a new bin.
-            bin_url = "https://filebin.net/api/bin"
-            
-            # First, create a new bin
-            bin_response = requests.post(bin_url)
-            bin_response.raise_for_status() # Will raise an error for bad status codes
-            bin_id = bin_response.json()['id']
-
-            # Now, upload the file to the created bin
-            upload_url = f"https://filebin.net/api/{bin_id}/file/{file_name}"
-
+            url = "http://0x0.st"
             with open(file_path, 'rb') as f:
-                headers = {'Content-Type': 'application/octet-stream'}
-                response = requests.post(upload_url, data=f, headers=headers)
+                files = {'file': f}
+                response = requests.post(url, files=files)
             
             response.raise_for_status()
-
-            # Construct the download link
-            download_link = f"https://filebin.net/{bin_id}/{file_name}"
-            return {'success': True, 'link': download_link}
+            
+            download_link = response.text.strip()
+            if download_link.startswith("http"):
+                 return {'success': True, 'link': download_link}
+            else:
+                logger.error(f"0x0.st upload returned invalid link: {download_link}")
+                return {'success': False, 'error': 'File host returned an invalid link.'}
 
         except requests.exceptions.RequestException as e:
-            logger.error(f"Filebin upload failed (RequestException): {e}")
+            logger.error(f"0x0.st upload failed (RequestException): {e}")
             return {'success': False, 'error': 'Failed to communicate with the file hosting service.'}
         except Exception as e:
             logger.error(f"Exception during upload: {traceback.format_exc()}")
@@ -157,7 +149,7 @@ Download links are active for about a week.
             else:
                 await processing_msg.edit_text("✅ Download complete! File is too large for Telegram, generating a download link...")
                 # --- THIS LINE HAS BEEN UPDATED ---
-                upload_result = await self.upload_to_filebin(file_path)
+                upload_result = await self.upload_to_0x0st(file_path)
                 # --- END OF UPDATE ---
                 if upload_result['success']:
                     link = upload_result['link']
