@@ -14,22 +14,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
-
-# Bot token - replace with your actual bot token
-#BOT_TOKEN = "7576952610:AAERhmFipUAWDSd4qmV8g_r7hvoxyIc6hDo"
-
-# Bot token - get from environment variable for security
-
-
+# Bot token is loaded from environment variables
 BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
-
-if not BOT_TOKEN:
-    print("❌ ERROR: BOT_TOKEN environment variable not set!")
-    print("Please set your bot token as an environment variable")
-    exit(1)
-
-
 
 class TEDTalkBot:
     def __init__(self):
@@ -64,7 +50,7 @@ Supported formats:
 - https://www.ted.com/talks/...
 - https://ted.com/talks/...
 
-The bot will download the video in the best available quality.
+The bot will download the video in the best available quality up to 720p.
         """
         await update.message.reply_text(help_text)
 
@@ -79,12 +65,17 @@ The bot will download the video in the best available quality.
             # Create a unique filename
             output_path = os.path.join(self.temp_dir, '%(title)s.%(ext)s')
             
+            # --- THIS IS THE UPDATED PART ---
             ydl_opts = {
-                'format': 'best[height<=720]',  # Limit quality to avoid large files
+                # Use a more robust format selector to find the best 720p MP4 version.
+                # This tries to get the best 720p video and audio and merge them,
+                # with a fallback to a pre-merged file.
+                'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]',
                 'outtmpl': output_path,
                 'noplaylist': True,
                 'extract_flat': False,
             }
+            # --- END OF UPDATE ---
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 # Extract info first
@@ -113,6 +104,7 @@ The bot will download the video in the best available quality.
                     # Check file size (Telegram limit is 50MB)
                     file_size = os.path.getsize(downloaded_file)
                     if file_size > 50 * 1024 * 1024:  # 50MB
+                        os.remove(downloaded_file) # Clean up oversized file
                         return {
                             'success': False,
                             'error': 'File too large (>50MB). Telegram limit exceeded.'
@@ -131,9 +123,16 @@ The bot will download the video in the best available quality.
                     }
                     
         except Exception as e:
+            logger.error(f"yt-dlp download error: {e}")
+            # Provide a cleaner error message to the user
+            if "Requested format is not available" in str(e):
+                 return {
+                    'success': False,
+                    'error': 'Could not find a suitable download format for this video.'
+                }
             return {
                 'success': False,
-                'error': f'Download failed: {str(e)}'
+                'error': 'An unexpected error occurred during download.'
             }
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -187,7 +186,8 @@ The bot will download the video in the best available quality.
                 await processing_msg.edit_text(f"❌ Error: {result['error']}")
                 
         except Exception as e:
-            await processing_msg.edit_text(f"❌ An error occurred: {str(e)}")
+            logger.error(f"General handling error: {e}")
+            await processing_msg.edit_text(f"❌ An unexpected error occurred.")
 
     def cleanup(self):
         """Clean up temporary files."""
@@ -198,6 +198,10 @@ The bot will download the video in the best available quality.
 
 def main():
     """Start the bot."""
+    if not BOT_TOKEN:
+        logger.error("FATAL: TELEGRAM_TOKEN environment variable not set.")
+        return
+
     # Create bot instance
     bot = TEDTalkBot()
     
@@ -210,15 +214,16 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message))
     
     # Run the bot
-    print("🤖 TED Talk Bot is starting...")
-    print("Press Ctrl+C to stop the bot")
+    logger.info("🤖 TED Talk Bot is starting...")
     
     try:
         application.run_polling(allowed_updates=Update.ALL_TYPES)
-    except KeyboardInterrupt:
-        print("\n🛑 Bot stopped by user")
+    except (Exception, KeyboardInterrupt) as e:
+        logger.info(f"🛑 Bot shutting down: {e}")
     finally:
         bot.cleanup()
 
 if __name__ == '__main__':
     main()
+
+
