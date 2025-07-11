@@ -137,6 +137,7 @@ Download links are active for 14 days.
                         caption=f"🎬 {title}\n📊 Size: {file_size / (1024*1024):.1f} MB",
                         supports_streaming=True
                     )
+                # Delete the temporary "Uploading..." message
                 await processing_msg.delete()
             else:
                 await processing_msg.edit_text("✅ Download complete! File is too large for Telegram, generating a download link...")
@@ -149,6 +150,7 @@ Download links are active for 14 days.
                         f"Here is your temporary download link (expires in 14 days):\n{link}"
                     )
                 else:
+                    # This is an error message, so it should stay.
                     await processing_msg.edit_text(f"❌ Error: {upload_result['error']}")
 
             # Clean up the downloaded file regardless of the outcome
@@ -157,13 +159,8 @@ Download links are active for 14 days.
         except Exception as e:
             logger.error(f"General handling error: {traceback.format_exc()}")
             await processing_msg.edit_text("❌ An unexpected error occurred.")
-        finally:
-            # This ensures the processing message is removed unless it's an error
-            if processing_msg and not processing_msg.text.startswith("❌"):
-                try:
-                    await processing_msg.delete()
-                except Exception:
-                    pass # Message might have been deleted already
+        # The faulty 'finally' block has been removed. Error and link messages will now persist.
+
 
     def cleanup(self):
         """Clean up temporary files."""
