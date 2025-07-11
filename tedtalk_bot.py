@@ -20,7 +20,10 @@ logger = logging.getLogger(__name__)
 #BOT_TOKEN = "7576952610:AAERhmFipUAWDSd4qmV8g_r7hvoxyIc6hDo"
 
 # Bot token - get from environment variable for security
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+BOT_TOKEN = ("BOT_TOKEN")
+
+#BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 if not BOT_TOKEN:
     print("❌ ERROR: BOT_TOKEN environment variable not set!")
