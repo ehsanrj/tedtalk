@@ -45,7 +45,7 @@ For videos under 50MB, I'll send the file directly. For larger videos, I'll prov
 3. Wait for the download to complete.
 4. You'll receive either the video file directly (if <50MB) or a download link (if >50MB).
 
-Download links are active for at least 30 days.
+Download links are active as long as they are regularly visited.
         """
         await update.message.reply_text(help_text)
 
@@ -54,29 +54,42 @@ Download links are active for at least 30 days.
         ted_domains = ['ted.com', 'www.ted.com']
         return any(domain in url.lower() for domain in ted_domains) and '/talks/' in url.lower()
 
-    async def upload_to_0x0st(self, file_path: str) -> dict:
-        """Uploads a file to 0x0.st and returns the link."""
+    # --- THIS FUNCTION HAS BEEN REPLACED ---
+    async def upload_to_gofile(self, file_path: str) -> dict:
+        """Uploads a file to GoFile.io and returns the link."""
         try:
-            url = "http://0x0.st"
+            # Step 1: Get the best server to upload to
+            server_response = requests.get("https://api.gofile.io/getServer")
+            server_response.raise_for_status()
+            server_data = server_response.json()
+            if server_data['status'] != 'ok':
+                return {'success': False, 'error': 'Could not get an upload server.'}
+            
+            server = server_data['data']['server']
+            upload_url = f"https://{server}.gofile.io/uploadFile"
+
+            # Step 2: Upload the file
             with open(file_path, 'rb') as f:
                 files = {'file': f}
-                response = requests.post(url, files=files)
+                response = requests.post(upload_url, files=files)
             
             response.raise_for_status()
-            
-            download_link = response.text.strip()
-            if download_link.startswith("http"):
-                 return {'success': True, 'link': download_link}
+            upload_data = response.json()
+
+            if upload_data['status'] == 'ok':
+                download_link = upload_data['data']['downloadPage']
+                return {'success': True, 'link': download_link}
             else:
-                logger.error(f"0x0.st upload returned invalid link: {download_link}")
-                return {'success': False, 'error': 'File host returned an invalid link.'}
+                logger.error(f"GoFile upload failed: {upload_data.get('data', {}).get('reason', 'Unknown reason')}")
+                return {'success': False, 'error': 'File host rejected the upload.'}
 
         except requests.exceptions.RequestException as e:
-            logger.error(f"0x0.st upload failed (RequestException): {e}")
+            logger.error(f"GoFile upload failed (RequestException): {e}")
             return {'success': False, 'error': 'Failed to communicate with the file hosting service.'}
         except Exception as e:
             logger.error(f"Exception during upload: {traceback.format_exc()}")
             return {'success': False, 'error': 'An exception occurred during file upload.'}
+    # --- END OF REPLACEMENT ---
 
     async def download_ted_talk(self, url: str) -> dict:
         """Download TED Talk video using yt-dlp."""
@@ -133,35 +146,35 @@ Download links are active for at least 30 days.
                 return
 
             file_path = download_result['file_path']
-            file_path_to_clean = file_path # Keep track of file for cleanup
+            file_path_to_clean = file_path
             file_size = download_result['file_size']
             title = download_result['title']
 
             if file_size < TELEGRAM_FILE_LIMIT:
                 await processing_msg.edit_text("✅ Download complete! Uploading video to Telegram...")
                 try:
-                    logger.info(f"Attempting to send video: {file_path}")
                     with open(file_path, 'rb') as video_file:
                         await update.message.reply_video(
                             video=video_file,
                             caption=f"🎬 {title}\n📊 Size: {file_size / (1024*1024):.1f} MB",
                             supports_streaming=True
                         )
-                    logger.info("Successfully sent video.")
                     await processing_msg.delete()
                 except Exception as e:
                     logger.error(f"Failed to send video to Telegram: {traceback.format_exc()}")
                     await processing_msg.edit_text("❌ Error: Failed to upload the video file to Telegram.")
 
             else:
-                await processing_msg.edit_text("✅ Download complete! File is too large for Telegram, generating a download link...")
-                upload_result = await self.upload_to_0x0st(file_path)
+                await processing_msg.edit_text("✅ Download complete! File is too large, uploading to a file host...")
+                # --- THIS LINE HAS BEEN UPDATED ---
+                upload_result = await self.upload_to_gofile(file_path)
+                # --- END OF UPDATE ---
                 if upload_result['success']:
                     link = upload_result['link']
                     await processing_msg.edit_text(
                         f"🎬 {title}\n\n"
                         f"🔗 This video is too large for Telegram ({file_size / (1024*1024):.1f} MB).\n\n"
-                        f"Here is your temporary download link:\n{link}"
+                        f"Here is your download link:\n{link}"
                     )
                 else:
                     await processing_msg.edit_text(f"❌ Error: {upload_result['error']}")
@@ -170,9 +183,7 @@ Download links are active for at least 30 days.
             logger.error(f"General handling error: {traceback.format_exc()}")
             await processing_msg.edit_text("❌ An unexpected error occurred.")
         finally:
-            # Cleanup the file at the very end
             if file_path_to_clean and os.path.exists(file_path_to_clean):
-                logger.info(f"Cleaning up file: {file_path_to_clean}")
                 os.remove(file_path_to_clean)
 
 
