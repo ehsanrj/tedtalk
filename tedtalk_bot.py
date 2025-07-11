@@ -54,7 +54,6 @@ Download links are active for at least 30 days.
         ted_domains = ['ted.com', 'www.ted.com']
         return any(domain in url.lower() for domain in ted_domains) and '/talks/' in url.lower()
 
-    # --- THIS FUNCTION HAS BEEN REPLACED ---
     async def upload_to_0x0st(self, file_path: str) -> dict:
         """Uploads a file to 0x0.st and returns the link."""
         try:
@@ -78,7 +77,6 @@ Download links are active for at least 30 days.
         except Exception as e:
             logger.error(f"Exception during upload: {traceback.format_exc()}")
             return {'success': False, 'error': 'An exception occurred during file upload.'}
-    # --- END OF REPLACEMENT ---
 
     async def download_ted_talk(self, url: str) -> dict:
         """Download TED Talk video using yt-dlp."""
@@ -126,6 +124,7 @@ Download links are active for at least 30 days.
         
         processing_msg = await update.message.reply_text("🔄 Processing your request...")
         
+        file_path_to_clean = None
         try:
             download_result = await self.download_ted_talk(message_text)
             
@@ -134,23 +133,29 @@ Download links are active for at least 30 days.
                 return
 
             file_path = download_result['file_path']
+            file_path_to_clean = file_path # Keep track of file for cleanup
             file_size = download_result['file_size']
             title = download_result['title']
 
             if file_size < TELEGRAM_FILE_LIMIT:
                 await processing_msg.edit_text("✅ Download complete! Uploading video to Telegram...")
-                with open(file_path, 'rb') as video_file:
-                    await update.message.reply_video(
-                        video=video_file,
-                        caption=f"🎬 {title}\n📊 Size: {file_size / (1024*1024):.1f} MB",
-                        supports_streaming=True
-                    )
-                await processing_msg.delete()
+                try:
+                    logger.info(f"Attempting to send video: {file_path}")
+                    with open(file_path, 'rb') as video_file:
+                        await update.message.reply_video(
+                            video=video_file,
+                            caption=f"🎬 {title}\n📊 Size: {file_size / (1024*1024):.1f} MB",
+                            supports_streaming=True
+                        )
+                    logger.info("Successfully sent video.")
+                    await processing_msg.delete()
+                except Exception as e:
+                    logger.error(f"Failed to send video to Telegram: {traceback.format_exc()}")
+                    await processing_msg.edit_text("❌ Error: Failed to upload the video file to Telegram.")
+
             else:
                 await processing_msg.edit_text("✅ Download complete! File is too large for Telegram, generating a download link...")
-                # --- THIS LINE HAS BEEN UPDATED ---
                 upload_result = await self.upload_to_0x0st(file_path)
-                # --- END OF UPDATE ---
                 if upload_result['success']:
                     link = upload_result['link']
                     await processing_msg.edit_text(
@@ -161,11 +166,15 @@ Download links are active for at least 30 days.
                 else:
                     await processing_msg.edit_text(f"❌ Error: {upload_result['error']}")
 
-            os.remove(file_path)
-
         except Exception as e:
             logger.error(f"General handling error: {traceback.format_exc()}")
             await processing_msg.edit_text("❌ An unexpected error occurred.")
+        finally:
+            # Cleanup the file at the very end
+            if file_path_to_clean and os.path.exists(file_path_to_clean):
+                logger.info(f"Cleaning up file: {file_path_to_clean}")
+                os.remove(file_path_to_clean)
+
 
     def cleanup(self):
         """Clean up temporary files."""
