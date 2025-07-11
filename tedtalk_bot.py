@@ -14,8 +14,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+
 # Bot token - replace with your actual bot token
-BOT_TOKEN = "7576952610:AAERhmFipUAWDSd4qmV8g_r7hvoxyIc6hDo"
+#BOT_TOKEN = "7576952610:AAERhmFipUAWDSd4qmV8g_r7hvoxyIc6hDo"
+
+# Bot token - get from environment variable for security
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+if not BOT_TOKEN:
+    print("❌ ERROR: BOT_TOKEN environment variable not set!")
+    print("Please set your bot token as an environment variable")
+    exit(1)
+
+
 
 class TEDTalkBot:
     def __init__(self):
